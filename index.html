@@ -94,6 +94,8 @@
       border-radius: 18px;
       padding: 22px 26px;
       box-shadow: 0 2px 14px rgba(108,92,231,0.07);
+      box-sizing: border-box;
+      overflow: hidden;
     }
     .card-head {
       display: flex; align-items: center; gap: 10px;
@@ -161,21 +163,25 @@
     }
 
     /* ── Form ── */
-    .form-group { margin-bottom: 16px; }
+    .form-group { margin-bottom: 16px; min-width: 0; }
     .form-group:last-child { margin-bottom: 0; }
     .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    @media (max-width: 480px) {
+      .form-row { grid-template-columns: 1fr; gap: 10px; }
+    }
     label {
       display: block;
       font-size: 12.5px; font-weight: 600;
       color: #4A5568; margin-bottom: 7px;
     }
     input[type="text"], input[type="date"], input[type="number"], textarea {
-      width: 100%; padding: 10px 13px;
+      width: 100%; max-width: 100%; padding: 10px 13px;
       border: 1.5px solid #E8E3FF;
       border-radius: 10px;
       font-size: 13.5px; color: #2D3748;
       background: #FAFAFE;
       outline: none;
+      box-sizing: border-box;
       transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
     }
     input:focus, textarea:focus {
@@ -184,7 +190,7 @@
       background: #fff;
     }
     textarea { resize: vertical; min-height: 108px; }
-    input[type="number"] { width: 120px; }
+    input[type="number"] { width: 120px; max-width: 100%; }
 
     /* ── Buttons ── */
     button {
