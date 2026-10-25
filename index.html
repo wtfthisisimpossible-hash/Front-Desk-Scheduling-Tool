@@ -151,6 +151,34 @@
     .tag-soft   { background: #ECFDF5; color: #065F46; }
     .tag-block  { background: #FEE2E2; color: #991B1B; }
     .toast-desc { color: #4A5568; line-height: 1.6; }
+    .prio-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+    .prio-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 10px; background: #FAFAFE;
+      border: 1.5px solid #DDD6FE; border-radius: 10px;
+      cursor: grab; user-select: none;
+    }
+    .prio-item.dragging { opacity: .4; }
+    .prio-item.drag-over { border-color: #6C5CE7; background: #EDE9FF; }
+    .prio-rank {
+      flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%;
+      background: #6C5CE7; color: #fff; font-size: 12px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .prio-text { flex: 1; min-width: 0; }
+    .prio-name { font-size: 13px; font-weight: 700; color: #2D3748; }
+    .prio-desc { font-size: 11.5px; color: #718096; line-height: 1.5; }
+    .prio-btns { display: flex; gap: 4px; flex-shrink: 0; }
+    .prio-btns button {
+      width: 28px; height: 28px; border: 1.5px solid #DDD6FE; border-radius: 7px;
+      background: #fff; color: #6C5CE7; cursor: pointer; font-size: 12px;
+    }
+    .prio-btns button:hover:not(:disabled) { background: #EDE9FF; }
+    .prio-btns button:disabled { opacity: .3; cursor: default; }
+    .prio-item.fixed { cursor: default; background: #EDE9FE; border-color: #C4B5FD; }
+    .prio-item.fixed .prio-rank { background: #5B21B6; font-size: 13px; }
+    .prio-sub { font-size: 12px; font-weight: 700; color: #4C1D95; margin: 4px 0 6px; }
+    .toast-box .prio-hint { font-size: 11.5px; color: #718096; line-height: 1.6; margin-bottom: 8px; }
 
     /* History card variant */
     .history-card {
@@ -396,7 +424,7 @@
     <div class="card-head" style="display:flex;align-items:center;">
       <div class="card-bar"></div>
       <div class="card-title">排班設定</div>
-      <button class="info-btn" onclick="document.getElementById('scheduleInfoToast').classList.add('show')" title="查看排班條件說明">i</button>
+      <button class="info-btn" onclick="openScheduleInfo()" title="排班條件說明與優先順序設定">i</button>
     </div>
 
     <div class="form-row">
@@ -444,7 +472,99 @@ let importedHistory = {};
 window.onload = function() {
   initDefaultDates();
   loadStaffFromStorage();
+  loadPriorityOrder();
 };
+
+// ── 排班條件優先順序 ──
+// 「不可多排名單」固定為最高優先級，不列入可調整清單
+const FIXED_FACTOR = { name: '不可多排名單', desc: '名單內人員本期已排到基準次數後，不再被排入（固定最優先，不可調整）' };
+const PRIORITY_FACTORS = {
+  interval:  { name: '最短間隔天數',   desc: '距上次排班未達設定天數者，優先排給其他人（越接近越不利）' },
+  sameDow:   { name: '同星期幾連排',   desc: '避免同一人連續兩次排在相同的星期幾' },
+  count:     { name: '累計排班次數',   desc: '累計次數（含匯入歷史）較少者優先，是主要均等機制' },
+  dowSpread: { name: '星期幾分佈',     desc: '避免同一人集中在特定星期幾，盡量平均' },
+  recency:   { name: '距上次天數',     desc: '越久沒排班者越優先（最多計 30 天）' }
+};
+const DEFAULT_PRIORITY = ['interval', 'sameDow', 'count', 'dowSpread', 'recency'];
+let priorityOrder = DEFAULT_PRIORITY.slice();
+
+function loadPriorityOrder() {
+  try {
+    let saved = JSON.parse(localStorage.getItem('scheduler_priority_order') || 'null');
+    if (Array.isArray(saved)) {
+      saved = saved.filter(k => k !== 'noExtra'); // 相容舊版儲存的順序
+      if (saved.length === DEFAULT_PRIORITY.length && DEFAULT_PRIORITY.every(k => saved.includes(k))) priorityOrder = saved;
+    }
+  } catch (e) {}
+}
+function savePriorityOrder() {
+  try { localStorage.setItem('scheduler_priority_order', JSON.stringify(priorityOrder)); } catch (e) {}
+}
+function movePriority(from, to) {
+  if (to < 0 || to >= priorityOrder.length || from === to) return;
+  const [k] = priorityOrder.splice(from, 1);
+  priorityOrder.splice(to, 0, k);
+  savePriorityOrder();
+  renderPriorityList();
+}
+function resetPriorityOrder() {
+  priorityOrder = DEFAULT_PRIORITY.slice();
+  savePriorityOrder();
+  renderPriorityList();
+}
+function renderPriorityList() {
+  const box = document.getElementById('toastRows');
+  if (!box) return;
+  const last = priorityOrder.length - 1;
+  box.innerHTML = `
+    <div class="prio-hint">排班時依下列順序逐項比較：上面的條件會完全壓過下面的條件，只有打平時才用下一個條件決勝。可拖曳或按 ▲▼ 調整順序，設定會自動儲存。</div>
+    <div class="prio-list">
+      <div class="prio-item fixed">
+        <div class="prio-rank">🔒</div>
+        <div class="prio-text">
+          <div class="prio-name">${FIXED_FACTOR.name}</div>
+          <div class="prio-desc">${FIXED_FACTOR.desc}</div>
+        </div>
+      </div>
+    </div>
+    <div class="prio-sub">可調整順序的條件</div>
+    <div class="prio-list" id="priorityList">` +
+    priorityOrder.map((k, i) => `
+      <div class="prio-item" draggable="true" data-idx="${i}">
+        <div class="prio-rank">${i + 1}</div>
+        <div class="prio-text">
+          <div class="prio-name">${PRIORITY_FACTORS[k].name}</div>
+          <div class="prio-desc">${PRIORITY_FACTORS[k].desc}</div>
+        </div>
+        <div class="prio-btns">
+          <button onclick="movePriority(${i}, ${i - 1})" ${i === 0 ? 'disabled' : ''} title="上移">▲</button>
+          <button onclick="movePriority(${i}, ${i + 1})" ${i === last ? 'disabled' : ''} title="下移">▼</button>
+        </div>
+      </div>`).join('') + `
+    </div>
+    <div class="btn-row"><button class="btn-secondary" onclick="resetPriorityOrder()">↺ 還原預設順序</button></div>`;
+  let dragFrom = null;
+  box.querySelectorAll('#priorityList .prio-item').forEach(el => {
+    el.addEventListener('dragstart', e => {
+      dragFrom = parseInt(el.dataset.idx);
+      el.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', String(dragFrom)); } catch (err) {}
+    });
+    el.addEventListener('dragend', () => el.classList.remove('dragging'));
+    el.addEventListener('dragover', e => { e.preventDefault(); el.classList.add('drag-over'); });
+    el.addEventListener('dragleave', () => el.classList.remove('drag-over'));
+    el.addEventListener('drop', e => {
+      e.preventDefault();
+      el.classList.remove('drag-over');
+      if (dragFrom !== null) movePriority(dragFrom, parseInt(el.dataset.idx));
+    });
+  });
+}
+function openScheduleInfo() {
+  renderPriorityList();
+  document.getElementById('scheduleInfoToast').classList.add('show');
+}
 
 // ── 日期初始化 ──
 function initDefaultDates() {
@@ -782,21 +902,31 @@ function generateSchedule() {
 
   let schedule = [], scheduleMap = {};
   for (let dayInfo of workdays) {
-    let bestPerson = null, maxScore = -Infinity;
+    let bestPerson = null, bestKey = null;
     for (let person of staff) {
       const p = stats[person];
       const curDate = new Date(dayInfo.date);
       let daysSinceLast = 999;
       if (p.lastDate) daysSinceLast = Math.ceil(Math.abs(curDate - new Date(p.lastDate)) / 86400000);
       const isSameWeekday = (p.lastDayOfWeek === dayInfo.dayOfWeek);
-      let score = 0;
-      score -= p.totalCount * 1000;
-      if (p.isNoExtra && (p.totalCount - p.importedCount) >= baseTargetCount) score -= 100000;
-      score += Math.min(daysSinceLast, 30) * 50;
-      score -= p.daysOfWeekCount[dayInfo.dayOfWeek] * 200;
-      if (daysSinceLast < minInterval) score -= (minInterval - daysSinceLast + 1) * 3000;
-      if (isSameWeekday) score -= 5000;
-      if (score > maxScore) { maxScore = score; bestPerson = person; }
+      // 每個條件的數值：越大越適合排班
+      const vals = {
+        noExtra:   (p.isNoExtra && (p.totalCount - p.importedCount) >= baseTargetCount) ? -1 : 0,
+        interval:  daysSinceLast < minInterval ? -(minInterval - daysSinceLast + 1) : 0,
+        sameDow:   isSameWeekday ? -1 : 0,
+        count:     -p.totalCount,
+        dowSpread: -p.daysOfWeekCount[dayInfo.dayOfWeek],
+        recency:   Math.min(daysSinceLast, 30)
+      };
+      // 不可多排名單固定最優先，其餘依使用者設定的順序逐項比較（字典序）；全部打平時維持名單順序
+      const key = [vals.noExtra, ...priorityOrder.map(k => vals[k])];
+      let better = bestKey === null;
+      if (!better) {
+        for (let i = 0; i < key.length; i++) {
+          if (key[i] !== bestKey[i]) { better = key[i] > bestKey[i]; break; }
+        }
+      }
+      if (better) { bestKey = key; bestPerson = person; }
     }
     const p = stats[bestPerson];
     p.dates.push(dayInfo.date);
@@ -1135,31 +1265,8 @@ function renderCalendarView(startStr, endStr, scheduleMap, holidayList) {
   <div class="toast-overlay" id="scheduleInfoToast" onclick="if(event.target===this)this.classList.remove('show')">
     <div class="toast-box">
       <button class="toast-close" onclick="document.getElementById('scheduleInfoToast').classList.remove('show')">×</button>
-      <div class="toast-title">📋 排班條件說明</div>
-      <div class="toast-row">
-        <span class="toast-tag tag-strong">① 最優先</span>
-        <span class="toast-desc"><b>不排多餘班名單</b>：該人員一旦達到基準次數，幾乎不會再被排入</span>
-      </div>
-      <div class="toast-row">
-        <span class="toast-tag tag-block">② 高優先</span>
-        <span class="toast-desc"><b>最短間隔天數</b>：距上次排班未達設定天數時，優先排給其他人</span>
-      </div>
-      <div class="toast-row">
-        <span class="toast-tag tag-block">③ 高優先</span>
-        <span class="toast-desc"><b>同星期幾連排</b>：避免同一人連續兩次都排在相同的星期幾</span>
-      </div>
-      <div class="toast-row">
-        <span class="toast-tag tag-mid">④ 中優先</span>
-        <span class="toast-desc"><b>累計排班次數</b>：優先排給累計次數較少的人，為主要均等機制</span>
-      </div>
-      <div class="toast-row">
-        <span class="toast-tag tag-soft">⑤ 輔助</span>
-        <span class="toast-desc"><b>星期幾分佈</b>：避免同一人集中在特定星期幾，盡量平均分配</span>
-      </div>
-      <div class="toast-row">
-        <span class="toast-tag tag-soft">⑥ 輔助</span>
-        <span class="toast-desc"><b>距上次天數</b>：越久沒排班者優先度略為提升，輔助均等分配</span>
-      </div>
+      <div class="toast-title">📋 排班條件說明與優先順序</div>
+      <div id="toastRows"></div>
     </div>
   </div>
 </body>
