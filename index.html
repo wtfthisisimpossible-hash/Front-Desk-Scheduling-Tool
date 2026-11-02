@@ -221,6 +221,15 @@
     textarea { resize: vertical; min-height: 108px; }
     input[type="number"] { width: 120px; max-width: 100%; }
 
+    /* ── 不可值班日期 ── */
+    .unavail-box { border: 1.5px solid #E8E3FF; border-radius: 12px; background: #FAFAFE; padding: 10px 14px; }
+    .unavail-empty { font-size: 12.5px; color: #A0AEC0; padding: 6px 0; }
+    .unavail-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid #F0EDFF; }
+    .unavail-row:last-child { border-bottom: none; }
+    .unavail-name { flex: 0 0 90px; font-size: 13px; font-weight: 700; color: #2D3748; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .unavail-row input[type="text"] { flex: 1; padding: 7px 11px; font-size: 13px; }
+    .form-hint { font-size: 11.5px; color: #718096; line-height: 1.6; margin-top: 6px; }
+
     /* ── Buttons ── */
     button {
       display: inline-flex; align-items: center; gap: 5px;
@@ -396,12 +405,18 @@
         <button class="btn-secondary" onclick="saveStaffToStorage()">💾 儲存至快取</button>
         <button class="btn-secondary" onclick="clearStaffStorage()">🗑 清除快取</button>
       </div>
-      <textarea id="staffList" placeholder="請在此輸入人員名單，每行一人&#10;例如：&#10;張三&#10;李四&#10;王五"></textarea>
+      <textarea id="staffList" oninput="renderUnavailableList()" placeholder="請在此輸入人員名單，每行一人&#10;例如：&#10;張三&#10;李四&#10;王五"></textarea>
     </div>
 
     <div class="form-group">
       <label for="noExtraList">不允許額外多排名單（以逗號分隔）：</label>
       <input type="text" id="noExtraList" placeholder="例如：張三, 李四（若班次無法均分，系統將絕不安排此名單人員多負擔一天）">
+    </div>
+
+    <div class="form-group">
+      <label>各人員不可值班日期（選填）：</label>
+      <div class="unavail-box" id="unavailList"></div>
+      <div class="form-hint">日期以逗號分隔，格式如 <b>2026-11-10</b>、<b>11/10</b>（年份取排班開始日期）；連續日期可用 <b>~</b>，例如 <b>11/10~11/12</b>。排班時該人員於這些日期絕不會被排入。按「💾 儲存至快取」可一併保存。</div>
     </div>
   </div>
 
@@ -468,10 +483,63 @@ let rawHolidayDates = [];
 let holidayNameMap  = {}; // { 'YYYY-MM-DD': '節日名稱' } 僅國定假日
 let lastSchedule    = [];
 let importedHistory = {};
+let unavailableMap  = {}; // { 人員: '日期字串' }
+
+// ── 各人員不可值班日期 ──
+function escAttr(str) { return String(str).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function renderUnavailableList() {
+  const box = document.getElementById('unavailList');
+  if (!box) return;
+  const staff = [...new Set(document.getElementById('staffList').value.split('\n').map(s => s.trim()).filter(s => s))];
+  if (staff.length === 0) { box.innerHTML = '<div class="unavail-empty">請先輸入人員名單，這裡會自動列出每個人員。</div>'; return; }
+  box.innerHTML = staff.map((name, i) => `
+    <div class="unavail-row">
+      <div class="unavail-name" title="${escAttr(name)}">${escAttr(name)}</div>
+      <input type="text" data-idx="${i}" value="${escAttr(unavailableMap[name] || '')}" placeholder="例如：11/10, 11/18~11/20">
+    </div>`).join('');
+  box.querySelectorAll('input[data-idx]').forEach(inp => {
+    inp.addEventListener('input', () => { unavailableMap[staff[+inp.dataset.idx]] = inp.value; });
+  });
+}
+function parseDateToken(tok, defYear) {
+  tok = tok.trim().replace(/[年月]/g, '/').replace(/日/g, '');
+  let m = tok.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/);
+  let y, mo, d;
+  if (m) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+  else {
+    m = tok.match(/^(\d{1,2})[-\/.](\d{1,2})$/);
+    if (!m) return null;
+    y = defYear; mo = +m[1]; d = +m[2];
+  }
+  const dt = new Date(y, mo - 1, d);
+  if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+  return `${y}-${String(mo).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+}
+function parseUnavailable(str, defYear, errors, who) {
+  const set = new Set();
+  (str || '').split(/[,，、;；\n]+/).map(t => t.trim()).filter(t => t).forEach(tok => {
+    const parts = tok.split(/\s*[~～到至]\s*/);
+    if (parts.length === 1) {
+      const d = parseDateToken(parts[0], defYear);
+      if (d) set.add(d); else errors.push(`${who}：「${tok}」`);
+    } else if (parts.length === 2) {
+      const a = parseDateToken(parts[0], defYear), b = parseDateToken(parts[1], defYear);
+      if (!a || !b || a > b) { errors.push(`${who}：「${tok}」`); return; }
+      const cur = new Date(a + 'T00:00:00');
+      const end = new Date(b + 'T00:00:00');
+      while (cur <= end) {
+        set.add(`${cur.getFullYear()}-${String(cur.getMonth()+1).padStart(2,'0')}-${String(cur.getDate()).padStart(2,'0')}`);
+        cur.setDate(cur.getDate() + 1);
+      }
+    } else errors.push(`${who}：「${tok}」`);
+  });
+  return set;
+}
 
 window.onload = function() {
   initDefaultDates();
   loadStaffFromStorage();
+  renderUnavailableList();
   loadPriorityOrder();
 };
 
@@ -639,12 +707,13 @@ function importStaffFromFile(event) {
   const file = event.target.files[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = e => { document.getElementById('staffList').value = e.target.result.trim(); };
+  reader.onload = e => { document.getElementById('staffList').value = e.target.result.trim(); renderUnavailableList(); };
   reader.readAsText(file);
 }
 function saveStaffToStorage() {
   localStorage.setItem('scheduler_staff_list',   document.getElementById('staffList').value);
   localStorage.setItem('scheduler_noextra_list', document.getElementById('noExtraList').value);
+  localStorage.setItem('scheduler_unavailable', JSON.stringify(unavailableMap));
   alert('資料已成功儲存至瀏覽器快取！');
 }
 function loadStaffFromStorage() {
@@ -652,12 +721,16 @@ function loadStaffFromStorage() {
   const n = localStorage.getItem('scheduler_noextra_list');
   if (s) document.getElementById('staffList').value   = s;
   if (n) document.getElementById('noExtraList').value = n;
+  try { unavailableMap = JSON.parse(localStorage.getItem('scheduler_unavailable') || '{}') || {}; } catch (e) { unavailableMap = {}; }
 }
 function clearStaffStorage() {
   localStorage.removeItem('scheduler_staff_list');
   localStorage.removeItem('scheduler_noextra_list');
+  localStorage.removeItem('scheduler_unavailable');
+  unavailableMap = {};
   document.getElementById('staffList').value   = '';
   document.getElementById('noExtraList').value = '';
+  renderUnavailableList();
   alert('已清除快取的名單！');
 }
 
@@ -728,6 +801,7 @@ function importDetailHistory(event) {
         if (Object.keys(temp).length > 0) {
           importedHistory = temp;
           document.getElementById('staffList').value = Object.keys(temp).join('\n');
+          renderUnavailableList();
           // 自動設定下個月排班區間
           const allDates = Object.values(temp).map(h => h.lastDate).filter(Boolean).sort();
           if (allDates.length > 0) {
@@ -804,6 +878,7 @@ function importDetailHistory(event) {
 
     importedHistory = temp;
     document.getElementById('staffList').value = Object.keys(temp).join('\n');
+    renderUnavailableList();
 
     // ── 修正3：根據過往班表最後日期，自動設定下個月的排班區間 ──
     const allDates = Object.values(temp).map(h => h.lastDate).filter(Boolean).sort();
@@ -865,6 +940,16 @@ function generateSchedule() {
   const minInterval  = parseInt(document.getElementById('minInterval').value) || 7;
   if (staff.length === 0) { alert('請先輸入或匯入人員名單！'); return; }
 
+  // 解析各人員不可值班日期
+  const defYear = (startDateStr || '').substring(0, 4) || String(new Date().getFullYear());
+  const unavailErrors = [];
+  const unavailSets = {};
+  staff.forEach(name => { unavailSets[name] = parseUnavailable(unavailableMap[name], +defYear, unavailErrors, name); });
+  if (unavailErrors.length > 0) {
+    alert('以下不可值班日期格式無法辨識，請修正後再排班：\n' + unavailErrors.join('\n'));
+    return;
+  }
+
   let currentDate = new Date(startDateStr);
   const endDate   = new Date(endDateStr);
   let workdays = [];
@@ -901,9 +986,11 @@ function generateSchedule() {
   }
 
   let schedule = [], scheduleMap = {};
+  const unassignedDates = [];
   for (let dayInfo of workdays) {
     let bestPerson = null, bestKey = null;
     for (let person of staff) {
+      if (unavailSets[person].has(dayInfo.date)) continue; // 該人員當天不可值班
       const p = stats[person];
       const curDate = new Date(dayInfo.date);
       let daysSinceLast = 999;
@@ -928,6 +1015,12 @@ function generateSchedule() {
       }
       if (better) { bestKey = key; bestPerson = person; }
     }
+    if (bestPerson === null) { // 當天所有人都不可值班
+      unassignedDates.push(dayInfo.date);
+      schedule.push({ date: dayInfo.date, day: dayInfo.dayOfWeekName, person: '（無人可排）', count: 0 });
+      scheduleMap[dayInfo.date] = '（無人可排）';
+      continue;
+    }
     const p = stats[bestPerson];
     p.dates.push(dayInfo.date);
     p.daysOfWeekCount[dayInfo.dayOfWeek]++;
@@ -938,6 +1031,9 @@ function generateSchedule() {
   lastSchedule = schedule;
 
   let html = '<div class="result-section">';
+  if (unassignedDates.length > 0) {
+    html += `<div style="background:#FFF5F5;border:1.5px solid #FEB2B2;color:#9B2C2C;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:13px;font-weight:600;">⚠️ 以下日期所有人員皆不可值班，無法排班：${unassignedDates.join('、')}</div>`;
+  }
 
   html += `<div class="export-bar" style="display:flex;align-items:center;gap:8px;">
     <button class="btn-warning" onclick="exportScheduleToXLSX()">📥 匯出值班表 XLSX</button>
@@ -953,7 +1049,7 @@ function generateSchedule() {
   html += '<h3>排班結果明細</h3>';
   html += '<table><tr><th>日期</th><th>星期</th><th>值班人員</th><th>個人累計次數</th></tr>';
   schedule.forEach(row => {
-    html += `<tr><td>${row.date}</td><td>週${row.day}</td><td>${row.person}</td><td>第 ${row.count} 次</td></tr>`;
+    html += `<tr><td>${row.date}</td><td>週${row.day}</td><td>${row.person}</td><td>${row.count ? '第 ' + row.count + ' 次' : '—'}</td></tr>`;
   });
   html += '</table>';
 
