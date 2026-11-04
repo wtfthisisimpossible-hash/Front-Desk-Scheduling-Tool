@@ -369,6 +369,21 @@
       font-weight: 700; font-size: 11.5px;
       display: inline-block; margin-top: 2px;
     }
+    .calendar-table .duty-person[draggable="true"] { cursor: grab; user-select: none; }
+    .calendar-table .duty-person.dragging, .palette-chip.dragging { opacity: .4; }
+    .calendar-table .duty-person.edited { background: #FEF3C7; color: #92400E; }
+    .calendar-table .duty-person.conflict { box-shadow: 0 0 0 2px #F59E0B; }
+    .calendar-table td.drag-over { background: #E9E5FF !important; box-shadow: inset 0 0 0 2px #6C5CE7; }
+    .edit-panel { background: #FAFAFE; border: 1.5px dashed #C4B5FD; border-radius: 12px; padding: 12px 16px; margin-bottom: 8px; }
+    .edit-title { font-size: 13.5px; font-weight: 700; color: #4C1D95; margin-bottom: 2px; }
+    .palette { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
+    .palette-chip {
+      background: #EDE9FF; color: #5849C7; padding: 4px 12px; border-radius: 20px;
+      font-weight: 700; font-size: 12.5px; cursor: grab; user-select: none; border: 1.5px solid #DDD6FE;
+    }
+    .edit-status { font-size: 12.5px; color: #4A5568; margin-top: 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .result-warn { background:#FFF5F5; border:1.5px solid #FEB2B2; color:#9B2C2C; border-radius:10px; padding:10px 14px; margin-bottom:12px; font-size:13px; font-weight:600; }
+    .result-warn.amber { background:#FFFBEB; border-color:#FCD34D; color:#92400E; }
     .calendar-table .holiday-tag { color: #E03131; font-size: 11px; display: block; }
   </style>
 </head>
@@ -541,6 +556,7 @@ window.onload = function() {
   loadStaffFromStorage();
   renderUnavailableList();
   loadPriorityOrder();
+  initDragEdit();
 };
 
 // ── 排班條件優先順序 ──
@@ -1029,10 +1045,72 @@ function generateSchedule() {
     scheduleMap[dayInfo.date] = bestPerson;
   }
   lastSchedule = schedule;
+  originalSchedule = schedule.map(r => Object.assign({}, r));
+  lastContext = { staff, noExtraStaff, startDateStr, endDateStr, holidayList, hasImportedHistory, unavailSets };
+  renderResult();
+}
+
+// ── 班表結果渲染（含手動調整） ──
+const UNASSIGNED = '（無人可排）';
+let originalSchedule = [];
+let lastContext = null;
+let dragData = null;
+
+function recalcSchedule() {
+  const run = {};
+  lastContext.staff.forEach(n => { run[n] = importedHistory[n] ? importedHistory[n].totalCount : 0; });
+  lastSchedule.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+  lastSchedule.forEach(row => {
+    if (!Object.prototype.hasOwnProperty.call(run, row.person)) { row.count = 0; return; }
+    row.count = ++run[row.person];
+  });
+}
+
+function computeStats() {
+  const st = Object.create(null);
+  lastContext.staff.forEach(n => {
+    const h = importedHistory[n];
+    st[n] = {
+      importedCount: h ? h.totalCount : 0,
+      totalCount:    h ? h.totalCount : 0,
+      daysOfWeekCount: h
+        ? { 1: h.daysOfWeekCount[1]||0, 2: h.daysOfWeekCount[2]||0, 3: h.daysOfWeekCount[3]||0, 4: h.daysOfWeekCount[4]||0, 5: h.daysOfWeekCount[5]||0 }
+        : { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 },
+      isNoExtra: lastContext.noExtraStaff.includes(n)
+    };
+  });
+  lastSchedule.forEach(row => {
+    const s = st[row.person];
+    if (!s) return;
+    const [y, m, d] = row.date.split('-').map(Number);
+    const dow = new Date(y, m - 1, d).getDay();
+    s.totalCount++;
+    if (dow >= 1 && dow <= 5) s.daysOfWeekCount[dow]++;
+  });
+  return st;
+}
+
+function renderResult() {
+  if (!lastContext) return;
+  const { staff, startDateStr, endDateStr, holidayList, hasImportedHistory, unavailSets } = lastContext;
+  const prevSel = document.getElementById('exportTitleSelect');
+  const prevTitle = prevSel ? prevSel.value : null;
+
+  recalcSchedule();
+  const scheduleMap = {}, origMap = {};
+  lastSchedule.forEach(r => { scheduleMap[r.date] = r.person; });
+  originalSchedule.forEach(r => { origMap[r.date] = r.person; });
+  const editedCount = lastSchedule.filter(r => origMap[r.date] !== r.person).length;
+  const unassigned  = lastSchedule.filter(r => r.person === UNASSIGNED).map(r => r.date);
+  const conflicts   = lastSchedule.filter(r => unavailSets[r.person] && unavailSets[r.person].has(r.date));
+  const stats = computeStats();
 
   let html = '<div class="result-section">';
-  if (unassignedDates.length > 0) {
-    html += `<div style="background:#FFF5F5;border:1.5px solid #FEB2B2;color:#9B2C2C;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:13px;font-weight:600;">⚠️ 以下日期所有人員皆不可值班，無法排班：${unassignedDates.join('、')}</div>`;
+  if (unassigned.length > 0) {
+    html += `<div class="result-warn">⚠️ 以下日期目前無人值班：${unassigned.join('、')}（可從下方人員列拖曳指派）</div>`;
+  }
+  if (conflicts.length > 0) {
+    html += `<div class="result-warn amber">⚠️ 手動調整後有 ${conflicts.length} 天安排在該人員設定的不可值班日（行事曆上以橘框標示）：${conflicts.map(r => r.date.substring(5) + ' ' + r.person).join('、')}</div>`;
   }
 
   html += `<div class="export-bar" style="display:flex;align-items:center;gap:8px;">
@@ -1043,13 +1121,24 @@ function generateSchedule() {
     </select>
   </div>`;
 
+  html += `<div class="edit-panel">
+    <div class="edit-title">✋ 手動調整班表</div>
+    <div class="form-hint">在行事曆中拖曳人名到另一天，兩天的人員會<b>互換</b>；從下方人員列拖曳到某一天，則<b>直接改派</b>該人員。手動調整不受任何排班條件限制，統計與匯出皆以調整後的班表為準。</div>
+    <div class="palette">${staff.map(n => `<span class="palette-chip" draggable="true" data-drag="person" data-person="${escAttr(n)}">${escAttr(n)}</span>`).join('')}</div>
+    <div class="edit-status">${editedCount > 0 ? `已手動調整 ${editedCount} 天（黃底標示）` : '尚未手動調整'}
+      ${editedCount > 0 ? '<button class="btn-secondary" onclick="resetManualEdits()">↺ 還原自動排班結果</button>' : ''}
+    </div>
+  </div>`;
+
   html += '<h3>行事曆形式班表</h3>';
   html += renderCalendarView(startDateStr, endDateStr, scheduleMap, holidayList);
 
   html += '<h3>排班結果明細</h3>';
   html += '<table><tr><th>日期</th><th>星期</th><th>值班人員</th><th>個人累計次數</th></tr>';
-  schedule.forEach(row => {
-    html += `<tr><td>${row.date}</td><td>週${row.day}</td><td>${row.person}</td><td>${row.count ? '第 ' + row.count + ' 次' : '—'}</td></tr>`;
+  lastSchedule.forEach(row => {
+    const edited = origMap[row.date] !== row.person;
+    const bad = unavailSets[row.person] && unavailSets[row.person].has(row.date);
+    html += `<tr${edited ? ' style="background:#FFFBEB;"' : ''}><td>${row.date}</td><td>週${row.day}</td><td>${escAttr(row.person)}${edited ? ' <span style="color:#92400E;font-size:11px;">（手動）</span>' : ''}${bad ? ' <span title="該人員設定此日不可值班">⚠️</span>' : ''}</td><td>${row.count ? '第 ' + row.count + ' 次' : '—'}</td></tr>`;
   });
   html += '</table>';
 
@@ -1059,7 +1148,7 @@ function generateSchedule() {
     staff.forEach(name => {
       const h = stats[name], newCount = h.totalCount - h.importedCount;
       const tag = h.isNoExtra ? '<span style="color:#d9534f;font-weight:bold;">不可多排</span>' : '一般';
-      html += `<tr><td><b>${name}</b></td><td>${tag}</td><td>${h.importedCount}</td><td>${newCount}</td><td><b>${h.totalCount}</b></td>
+      html += `<tr><td><b>${escAttr(name)}</b></td><td>${tag}</td><td>${h.importedCount}</td><td>${newCount}</td><td><b>${h.totalCount}</b></td>
         <td>${h.daysOfWeekCount[1]}</td><td>${h.daysOfWeekCount[2]}</td><td>${h.daysOfWeekCount[3]}</td><td>${h.daysOfWeekCount[4]}</td><td>${h.daysOfWeekCount[5]}</td></tr>`;
     });
   } else {
@@ -1068,12 +1157,68 @@ function generateSchedule() {
     staff.forEach(name => {
       const h = stats[name];
       const tag = h.isNoExtra ? '<span style="color:#d9534f;font-weight:bold;">不可多排</span>' : '一般';
-      html += `<tr><td><b>${name}</b></td><td>${tag}</td><td>${h.totalCount}</td>
+      html += `<tr><td><b>${escAttr(name)}</b></td><td>${tag}</td><td>${h.totalCount}</td>
         <td>${h.daysOfWeekCount[1]}</td><td>${h.daysOfWeekCount[2]}</td><td>${h.daysOfWeekCount[3]}</td><td>${h.daysOfWeekCount[4]}</td><td>${h.daysOfWeekCount[5]}</td></tr>`;
     });
   }
   html += '</table></div>';
   document.getElementById('result').innerHTML = html;
+  if (prevTitle) { const sel = document.getElementById('exportTitleSelect'); if (sel) sel.value = prevTitle; }
+}
+
+function applyManualEdit(src, toDate) {
+  const to = lastSchedule.find(r => r.date === toDate);
+  if (!to) return;
+  if (src.type === 'date') {
+    if (src.value === toDate) return;
+    const from = lastSchedule.find(r => r.date === src.value);
+    if (!from) return;
+    const t = from.person; from.person = to.person; to.person = t;
+  } else {
+    if (to.person === src.value) return;
+    to.person = src.value;
+  }
+  renderResult();
+}
+
+function resetManualEdits() {
+  lastSchedule = originalSchedule.map(r => Object.assign({}, r));
+  renderResult();
+}
+
+function initDragEdit() {
+  const root = document.getElementById('result');
+  const clearOver = () => root.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+  root.addEventListener('dragstart', e => {
+    const el = e.target.closest ? e.target.closest('[data-drag]') : null;
+    if (!el) return;
+    dragData = el.dataset.drag === 'date'
+      ? { type: 'date',   value: el.dataset.date }
+      : { type: 'person', value: el.dataset.person };
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', dragData.value); } catch (err) {}
+    el.classList.add('dragging');
+  });
+  root.addEventListener('dragend', () => {
+    dragData = null; clearOver();
+    root.querySelectorAll('.dragging').forEach(el => el.classList.remove('dragging'));
+  });
+  root.addEventListener('dragover', e => {
+    if (!dragData) return;
+    const cell = e.target.closest ? e.target.closest('td[data-date]') : null;
+    if (!cell) return;
+    e.preventDefault();
+    if (!cell.classList.contains('drag-over')) { clearOver(); cell.classList.add('drag-over'); }
+  });
+  root.addEventListener('drop', e => {
+    if (!dragData) return;
+    const cell = e.target.closest ? e.target.closest('td[data-date]') : null;
+    if (!cell) return;
+    e.preventDefault();
+    clearOver();
+    const src = dragData; dragData = null;
+    applyManualEdit(src, cell.dataset.date);
+  });
 }
 
 // ── XLSX 匯出（ExcelJS，支援完整儲存格樣式） ──
@@ -1320,6 +1465,8 @@ async function exportScheduleToXLSX() {
 // ── 月曆渲染 ──
 function renderCalendarView(startStr, endStr, scheduleMap, holidayList) {
   let calHtml = '';
+  const calOrigMap = {};
+  originalSchedule.forEach(r => { calOrigMap[r.date] = r.person; });
   let currentMonth = new Date(new Date(startStr).getFullYear(), new Date(startStr).getMonth(), 1);
   const endMonth   = new Date(new Date(endStr).getFullYear(),   new Date(endStr).getMonth(),   1);
   while (currentMonth <= endMonth) {
@@ -1341,9 +1488,18 @@ function renderCalendarView(startStr, endStr, scheduleMap, holidayList) {
       const isHoliday  = holidayList.includes(dateKey);
       const isOutRange = (dateKey < startStr || dateKey > endStr);
       const cellClass  = isWeekend ? 'weekend' : isHoliday ? 'holiday' : '';
-      calHtml += `<td class="${cellClass}"><div class="date-num">${day}</div>`;
+      calHtml += `<td class="${cellClass}"${(!isOutRange && scheduleMap[dateKey]) ? ` data-date="${dateKey}"` : ''}><div class="date-num">${day}</div>`;
       if (!isOutRange) {
-        if (scheduleMap[dateKey])  calHtml += `<span class="duty-person">${scheduleMap[dateKey]}</span>`;
+        if (scheduleMap[dateKey]) {
+          const per = scheduleMap[dateKey];
+          const cls = ['duty-person'];
+          const orig = calOrigMap[dateKey];
+          if (orig !== undefined && orig !== per) cls.push('edited');
+          const us = lastContext && lastContext.unavailSets[per];
+          if (us && us.has(dateKey)) cls.push('conflict');
+          const canDrag = per !== UNASSIGNED;
+          calHtml += `<span class="${cls.join(' ')}"${canDrag ? ` draggable="true" data-drag="date" data-date="${dateKey}"` : ''}>${escAttr(per)}</span>`;
+        }
         else if (isHoliday)        calHtml += `<span class="holiday-tag">休/假日</span>`;
       }
       calHtml += `</td>`;
